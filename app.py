@@ -1,79 +1,90 @@
+# app.py
 import streamlit as st
-from PIL import Image
-import numpy as np
 import json
-import io
+import numpy as np
+from PIL import Image
+import base64
+from io import BytesIO
 
-# Grid size (smaller = higher compression, bigger = better quality)
-GRID = 16  
+# ------------------------------
+# Helper Functions
+# ------------------------------
 
-def image_to_symbolic(img, grid=GRID, palette_size=16):
-    img = img.convert("RGB")
-    w, h = img.size
-    img = img.resize(((w // grid) * grid, (h // grid) * grid))  # fit to grid
-    w, h = img.size
+# 1. Simplified symbolic alphabet (16 colors, 4-bit per pixel)
+SYMBOLS = "0123456789ABCDEF"
+COLOR_PALETTE = [
+    (0,0,0), (255,255,255), (255,0,0), (0,255,0),
+    (0,0,255), (255,255,0), (255,0,255), (0,255,255),
+    (128,0,0), (0,128,0), (0,0,128), (128,128,0),
+    (128,0,128), (0,128,128), (192,192,192), (128,128,128)
+]
 
-    # Quantize to limited colors (palette)
-    img = img.convert("P", palette=Image.ADAPTIVE, colors=palette_size).convert("RGB")
-    pixels = np.array(img)
+# Encode image to symbolic JSON
+def image_to_symbolic(img: Image.Image):
+    img = img.convert("RGB").resize((16,16))  # 16x16 for 1KB goal
+    arr = np.array(img)
+    grid = []
+    for y in range(16):
+        row = []
+        for x in range(16):
+            # Find closest color in palette
+            pixel = tuple(arr[y,x])
+            distances = [sum((c-p)**2 for c,p in zip(color,pixel)) for color in COLOR_PALETTE]
+            index = int(np.argmin(distances))
+            row.append(SYMBOLS[index])
+        grid.append(row)
+    return {"width":16, "height":16, "grid":grid}
 
-    symbolic = {
-        "width": w,
-        "height": h,
-        "grid": grid,
-        "palette": list({tuple(p) for row in pixels for p in row}),  # unique colors
-        "blocks": []
-    }
-    palette = symbolic["palette"]
-
-    # Encode blocks
-    for y in range(0, h, grid):
-        for x in range(0, w, grid):
-            block = pixels[y:y+grid, x:x+grid]
-            avg = np.mean(block.reshape(-1,3), axis=0).astype(int).tolist()
-            # Find nearest palette index
-            color_idx = min(range(len(palette)), key=lambda i: np.linalg.norm(np.array(palette[i])-avg))
-            symbolic["blocks"].append(f"B{x//grid},{y//grid},{color_idx}")
-
-    return symbolic
-
+# Decode symbolic JSON back to image
 def symbolic_to_image(symbolic):
-    w, h, grid = symbolic["width"], symbolic["height"], symbolic["grid"]
-    palette = symbolic["palette"]
-
-    img = Image.new("RGB", (w, h), "white")
-    for block in symbolic["blocks"]:
-        _, coords, color_idx = block[0], block[1:-2], block.split(",")[-1]
-        x, y = map(int, block[1:-2].split(","))
-        color = tuple(palette[int(color_idx)])
-        for yy in range(y*grid, (y+1)*grid):
-            for xx in range(x*grid, (x+1)*grid):
-                img.putpixel((xx, yy), color)
+    w, h = symbolic["width"], symbolic["height"]
+    grid = symbolic["grid"]
+    img = Image.new("RGB", (w,h))
+    for y in range(h):
+        for x in range(w):
+            symbol = grid[y][x]
+            index = SYMBOLS.index(symbol)
+            img.putpixel((x,y), COLOR_PALETTE[index])
     return img
 
-# ---------------- Streamlit UI ----------------
-st.title("🟢 Image to Tiny Symbolic JSON")
+# ------------------------------
+# Streamlit App
+# ------------------------------
 
-option = st.radio("Choose Action:", ["Encode Image → JSON", "Decode JSON → Image"])
+st.title("1KB Symbolic Image Encoder/Decoder")
 
-if option == "Encode Image → JSON":
-    uploaded = st.file_uploader("Upload Image", type=["png","jpg","jpeg"])
-    if uploaded:
-        img = Image.open(uploaded)
-        st.image(img, caption="Original", use_column_width=True)
+# Upload image to encode
+uploaded_file = st.file_uploader("Upload Image to Encode", type=["png","jpg","jpeg"])
+if uploaded_file:
+    img = Image.open(uploaded_file)
+    st.image(img, caption="Original Image", use_column_width=True)
+    
+    symbolic = image_to_symbolic(img)
+    json_str = json.dumps(symbolic, indent=2)
+    
+    st.download_button(
+        label="Download Symbolic JSON",
+        data=json_str,
+        file_name="symbolic.json",
+        mime="application/json"
+    )
+    
+    st.write("Encoded symbolic JSON preview:")
+    st.code(json_str[:500] + "\n...")  # preview first 500 chars
 
-        symbolic = image_to_symbolic(img)
-        json_bytes = json.dumps(symbolic, separators=(",",":")).encode()
-
-        st.download_button("⬇️ Download Symbolic JSON", data=json_bytes, file_name="symbolic.json", mime="application/json")
-
-elif option == "Decode JSON → Image":
-    uploaded = st.file_uploader("Upload Symbolic JSON", type=["json"])
-    if uploaded:
-        symbolic = json.load(uploaded)
-        img = symbolic_to_image(symbolic)
-        st.image(img, caption="Decoded Image", use_column_width=True)
-
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        st.download_button("⬇️ Download Decoded Image", data=buf.getvalue(), file_name="decoded.png", mime="image/png")
+# Upload symbolic JSON to decode
+uploaded_json = st.file_uploader("Upload Symbolic JSON to Decode", type=["json"])
+if uploaded_json:
+    symbolic = json.load(uploaded_json)
+    img_decoded = symbolic_to_image(symbolic)
+    st.image(img_decoded, caption="Decoded Image", use_column_width=True)
+    
+    # Download decoded image
+    buffered = BytesIO()
+    img_decoded.save(buffered, format="PNG")
+    st.download_button(
+        label="Download Decoded PNG",
+        data=buffered.getvalue(),
+        file_name="decoded.png",
+        mime="image/png"
+    )
