@@ -1,81 +1,77 @@
 import streamlit as st
-import numpy as np
 from PIL import Image
-import io
+import numpy as np
 import json
-import base64
+import io
+import random
 
-# --- Helper functions ---
+PATCH_SIZE = 16  # each patch is 16x16
 
-def image_to_patches(img, patch_size=32, quality=70):
-    """Convert image into patches and return symbolic JSON with JPEG base64."""
-    w, h = img.size
+# --- Encoder ---
+def encode_image(img: Image.Image):
     img = img.convert("RGB")
-    patches = []
-    symbolic = {"width": w, "height": h, "patch_size": patch_size, "patches": []}
+    w, h = img.size
+    symbolic = {
+        "width": w,
+        "height": h,
+        "patch_size": PATCH_SIZE,
+        "patches": []
+    }
     
-    for y in range(0, h, patch_size):
-        for x in range(0, w, patch_size):
-            box = (x, y, min(x+patch_size, w), min(y+patch_size, h))
-            patch = img.crop(box)
-            buffer = io.BytesIO()
-            patch.save(buffer, format="JPEG", quality=quality)
-            b64 = base64.b64encode(buffer.getvalue()).decode()
-            symbolic["patches"].append({"x": x, "y": y, "data": b64})
+    pixels = np.array(img)
+    
+    for y in range(0, h, PATCH_SIZE):
+        for x in range(0, w, PATCH_SIZE):
+            patch = pixels[y:y+PATCH_SIZE, x:x+PATCH_SIZE]
+            avg_color = patch.mean(axis=(0,1)).astype(int).tolist()
+            seed = random.randint(0, 65535)
+            
+            symbolic["patches"].append({
+                "x": int(x),
+                "y": int(y),
+                "seed": seed,
+                "avg_color": avg_color
+            })
+    
     return symbolic
 
-def patches_to_image(symbolic):
-    """Decode symbolic JSON back to image."""
-    w = symbolic["width"]
-    h = symbolic["height"]
-    patch_size = symbolic["patch_size"]
-    canvas = Image.new("RGB", (w, h))
-    for p in symbolic["patches"]:
-        patch_data = base64.b64decode(p["data"])
-        patch_img = Image.open(io.BytesIO(patch_data))
-        canvas.paste(patch_img, (p["x"], p["y"]))
+# --- Decoder ---
+def decode_symbolic(symbolic):
+    w, h = symbolic["width"], symbolic["height"]
+    canvas = Image.new("RGB", (w,h))
+    for patch in symbolic["patches"]:
+        x, y = patch["x"], patch["y"]
+        avg_color = patch["avg_color"]
+        seed = patch["seed"]
+        
+        # Generate pattern from seed
+        random.seed(seed)
+        patch_array = np.zeros((PATCH_SIZE, PATCH_SIZE, 3), dtype=np.uint8)
+        for i in range(PATCH_SIZE):
+            for j in range(PATCH_SIZE):
+                patch_array[i,j] = [min(255,max(0, avg_color[c] + random.randint(-10,10))) for c in range(3)]
+        
+        canvas.paste(Image.fromarray(patch_array), (x,y))
+    
     return canvas
 
 # --- Streamlit UI ---
+st.title("Observer Effect Inspired Image Encoder")
 
-st.title("Symbolic Image Codec with JPEG Patches")
-
-mode = st.radio("Select mode:", ["Encode Image", "Decode JSON"])
-
-if mode == "Encode Image":
-    uploaded = st.file_uploader("Upload image (PNG, JPEG)", type=["png", "jpg", "jpeg"])
-    patch_size = st.number_input("Patch size (px)", min_value=8, max_value=128, value=32)
-    quality = st.slider("JPEG quality", min_value=10, max_value=95, value=70)
+uploaded_file = st.file_uploader("Upload an Image", type=["png","jpg","jpeg"])
+if uploaded_file:
+    img = Image.open(uploaded_file)
+    st.image(img, caption="Original Image", use_column_width=True)
     
-    if uploaded:
-        img = Image.open(uploaded)
-        st.image(img, caption="Original Image", use_column_width=True)
-        
-        symbolic = image_to_patches(img, patch_size=patch_size, quality=quality)
-        json_bytes = json.dumps(symbolic, indent=2).encode()
-        
-        st.download_button(
-            label="Download Symbolic JSON",
-            data=json_bytes,
-            file_name="symbolic.json",
-            mime="application/json"
-        )
-        st.success(f"Encoded! Symbolic JSON size: {len(json_bytes)//1024} KB")
-
-elif mode == "Decode JSON":
-    uploaded_json = st.file_uploader("Upload symbolic JSON", type=["json"])
+    if st.button("Encode to Symbolic JSON"):
+        symbolic = encode_image(img)
+        json_bytes = json.dumps(symbolic).encode()
+        st.download_button("Download JSON", data=json_bytes, file_name="symbolic.json")
     
+    st.markdown("---")
+    
+    uploaded_json = st.file_uploader("Upload Symbolic JSON to Decode", type=["json"])
     if uploaded_json:
-        symbolic = json.load(uploaded_json)
-        decoded_img = patches_to_image(symbolic)
-        st.image(decoded_img, caption="Decoded Image", use_column_width=True)
-        
-        buffer = io.BytesIO()
-        decoded_img.save(buffer, format="PNG")
-        st.download_button(
-            label="Download Decoded PNG",
-            data=buffer.getvalue(),
-            file_name="decoded.png",
-            mime="image/png"
-        )
-        st.success("Decoded image ready!")
+        symbolic_data = json.load(uploaded_json)
+        canvas = decode_symbolic(symbolic_data)
+        st.image(canvas, caption="Decoded Image", use_column_width=True)
