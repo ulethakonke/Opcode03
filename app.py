@@ -1,90 +1,81 @@
-# app.py
 import streamlit as st
-import json
 import numpy as np
 from PIL import Image
+import io
+import json
 import base64
-from io import BytesIO
 
-# ------------------------------
-# Helper Functions
-# ------------------------------
+# --- Helper functions ---
 
-# 1. Simplified symbolic alphabet (16 colors, 4-bit per pixel)
-SYMBOLS = "0123456789ABCDEF"
-COLOR_PALETTE = [
-    (0,0,0), (255,255,255), (255,0,0), (0,255,0),
-    (0,0,255), (255,255,0), (255,0,255), (0,255,255),
-    (128,0,0), (0,128,0), (0,0,128), (128,128,0),
-    (128,0,128), (0,128,128), (192,192,192), (128,128,128)
-]
-
-# Encode image to symbolic JSON
-def image_to_symbolic(img: Image.Image):
-    img = img.convert("RGB").resize((16,16))  # 16x16 for 1KB goal
-    arr = np.array(img)
-    grid = []
-    for y in range(16):
-        row = []
-        for x in range(16):
-            # Find closest color in palette
-            pixel = tuple(arr[y,x])
-            distances = [sum((c-p)**2 for c,p in zip(color,pixel)) for color in COLOR_PALETTE]
-            index = int(np.argmin(distances))
-            row.append(SYMBOLS[index])
-        grid.append(row)
-    return {"width":16, "height":16, "grid":grid}
-
-# Decode symbolic JSON back to image
-def symbolic_to_image(symbolic):
-    w, h = symbolic["width"], symbolic["height"]
-    grid = symbolic["grid"]
-    img = Image.new("RGB", (w,h))
-    for y in range(h):
-        for x in range(w):
-            symbol = grid[y][x]
-            index = SYMBOLS.index(symbol)
-            img.putpixel((x,y), COLOR_PALETTE[index])
-    return img
-
-# ------------------------------
-# Streamlit App
-# ------------------------------
-
-st.title("1KB Symbolic Image Encoder/Decoder")
-
-# Upload image to encode
-uploaded_file = st.file_uploader("Upload Image to Encode", type=["png","jpg","jpeg"])
-if uploaded_file:
-    img = Image.open(uploaded_file)
-    st.image(img, caption="Original Image", use_column_width=True)
+def image_to_patches(img, patch_size=32, quality=70):
+    """Convert image into patches and return symbolic JSON with JPEG base64."""
+    w, h = img.size
+    img = img.convert("RGB")
+    patches = []
+    symbolic = {"width": w, "height": h, "patch_size": patch_size, "patches": []}
     
-    symbolic = image_to_symbolic(img)
-    json_str = json.dumps(symbolic, indent=2)
-    
-    st.download_button(
-        label="Download Symbolic JSON",
-        data=json_str,
-        file_name="symbolic.json",
-        mime="application/json"
-    )
-    
-    st.write("Encoded symbolic JSON preview:")
-    st.code(json_str[:500] + "\n...")  # preview first 500 chars
+    for y in range(0, h, patch_size):
+        for x in range(0, w, patch_size):
+            box = (x, y, min(x+patch_size, w), min(y+patch_size, h))
+            patch = img.crop(box)
+            buffer = io.BytesIO()
+            patch.save(buffer, format="JPEG", quality=quality)
+            b64 = base64.b64encode(buffer.getvalue()).decode()
+            symbolic["patches"].append({"x": x, "y": y, "data": b64})
+    return symbolic
 
-# Upload symbolic JSON to decode
-uploaded_json = st.file_uploader("Upload Symbolic JSON to Decode", type=["json"])
-if uploaded_json:
-    symbolic = json.load(uploaded_json)
-    img_decoded = symbolic_to_image(symbolic)
-    st.image(img_decoded, caption="Decoded Image", use_column_width=True)
+def patches_to_image(symbolic):
+    """Decode symbolic JSON back to image."""
+    w = symbolic["width"]
+    h = symbolic["height"]
+    patch_size = symbolic["patch_size"]
+    canvas = Image.new("RGB", (w, h))
+    for p in symbolic["patches"]:
+        patch_data = base64.b64decode(p["data"])
+        patch_img = Image.open(io.BytesIO(patch_data))
+        canvas.paste(patch_img, (p["x"], p["y"]))
+    return canvas
+
+# --- Streamlit UI ---
+
+st.title("Symbolic Image Codec with JPEG Patches")
+
+mode = st.radio("Select mode:", ["Encode Image", "Decode JSON"])
+
+if mode == "Encode Image":
+    uploaded = st.file_uploader("Upload image (PNG, JPEG)", type=["png", "jpg", "jpeg"])
+    patch_size = st.number_input("Patch size (px)", min_value=8, max_value=128, value=32)
+    quality = st.slider("JPEG quality", min_value=10, max_value=95, value=70)
     
-    # Download decoded image
-    buffered = BytesIO()
-    img_decoded.save(buffered, format="PNG")
-    st.download_button(
-        label="Download Decoded PNG",
-        data=buffered.getvalue(),
-        file_name="decoded.png",
-        mime="image/png"
-    )
+    if uploaded:
+        img = Image.open(uploaded)
+        st.image(img, caption="Original Image", use_column_width=True)
+        
+        symbolic = image_to_patches(img, patch_size=patch_size, quality=quality)
+        json_bytes = json.dumps(symbolic, indent=2).encode()
+        
+        st.download_button(
+            label="Download Symbolic JSON",
+            data=json_bytes,
+            file_name="symbolic.json",
+            mime="application/json"
+        )
+        st.success(f"Encoded! Symbolic JSON size: {len(json_bytes)//1024} KB")
+
+elif mode == "Decode JSON":
+    uploaded_json = st.file_uploader("Upload symbolic JSON", type=["json"])
+    
+    if uploaded_json:
+        symbolic = json.load(uploaded_json)
+        decoded_img = patches_to_image(symbolic)
+        st.image(decoded_img, caption="Decoded Image", use_column_width=True)
+        
+        buffer = io.BytesIO()
+        decoded_img.save(buffer, format="PNG")
+        st.download_button(
+            label="Download Decoded PNG",
+            data=buffer.getvalue(),
+            file_name="decoded.png",
+            mime="image/png"
+        )
+        st.success("Decoded image ready!")
