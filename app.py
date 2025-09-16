@@ -47,14 +47,17 @@ if uploaded:
         symbolic = image_to_symbolic(img)
         st.success("Image encoded with pixel precision!")
 
-        # Save symbolic JSON
-        json_bytes = json.dumps(symbolic).encode("utf-8")
-        st.download_button("⬇️ Download Symbolic JSON", json_bytes, "symbolic.json")
+        # ✅ Save symbolic JSON properly
+        json_str = json.dumps(symbolic, indent=2)
+        json_bytes = io.BytesIO(json_str.encode("utf-8"))
+        st.download_button("⬇️ Download Symbolic JSON", json_bytes, "symbolic.json", "application/json")
 
-        # Preview symbolic
+        # ✅ Preview decoded image
         decoded = symbolic_to_image(symbolic)
         st.image(decoded, caption="Decoded (Sharp)", use_column_width=True)
 
-        buf = io.BytesIO()
-        decoded.save(buf, format="PNG")
-        st.download_button("⬇️ Download Decoded PNG", buf.getvalue(), "decoded.png")
+        # ✅ Save decoded PNG properly
+        png_buf = io.BytesIO()
+        decoded.save(png_buf, format="PNG")
+        png_buf.seek(0)
+        st.download_button("⬇️ Download Decoded PNG", png_buf, "decoded.png", "image/png")
