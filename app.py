@@ -7,7 +7,10 @@ import io
 SYMBOLS = {
     "square": "⬛",
     "circle": "⬤",
-    "triangle": "▲",
+    "triangle_up": "▲",
+    "triangle_down": "▼",
+    "diamond": "◆",
+    "gradient": "▒",
 }
 
 def block_is_uniform(block, tolerance=15):
@@ -17,20 +20,23 @@ def block_is_uniform(block, tolerance=15):
     diffs = np.abs(pixels - mean_color).mean()
     return diffs < tolerance, tuple(map(int, mean_color))
 
-def dominant_shape(block):
-    """
-    Guess shape type: square, circle, triangle.
-    Currently random-ish based on brightness variance.
-    """
+def choose_shape(block):
+    """Decide best shape for this block based on variance & edges."""
     arr = np.array(block).astype(np.int32)
     gray = arr.mean(axis=2)
+
     var = gray.var()
-    if var < 100:  # flat = square
+    gy, gx = np.gradient(gray.astype(float))
+    edge_strength = np.mean(np.abs(gx) + np.abs(gy))
+
+    if var < 80:  # very flat
         return "square"
-    elif var < 300:  # some gradient = circle
-        return "circle"
-    else:  # high detail = triangle
-        return "triangle"
+    elif edge_strength < 40:  # smooth → circle or gradient
+        return "circle" if var < 200 else "gradient"
+    elif edge_strength > 300:  # strong edges → triangles or diamonds
+        return "diamond" if var > 500 else "triangle_up"
+    else:
+        return "triangle_down"
 
 def encode_block(x, y, size, img, min_size=2):
     """Recursively encode a block of the image."""
@@ -38,7 +44,7 @@ def encode_block(x, y, size, img, min_size=2):
     uniform, color = block_is_uniform(block)
 
     if uniform or size <= min_size:
-        shape = dominant_shape(block)
+        shape = choose_shape(block)
         symbol = f"{SYMBOLS[shape]}{color}@({x},{y})S{size}"
         return [symbol]
     else:
@@ -50,7 +56,7 @@ def encode_block(x, y, size, img, min_size=2):
         return symbols
 
 def encode_image_to_language(img, block_size=16):
-    """Encode an entire image to symbolic language."""
+    """Encode entire image into symbolic language."""
     width, height = img.size
     symbols = []
     for y in range(0, height, block_size):
@@ -76,15 +82,23 @@ def decode_language_to_image(symbols, width, height):
                 draw.rectangle([x, y, x+size, y+size], fill=color)
             elif symbol == SYMBOLS["circle"]:
                 draw.ellipse([x, y, x+size, y+size], fill=color)
-            elif symbol == SYMBOLS["triangle"]:
+            elif symbol == SYMBOLS["triangle_up"]:
                 draw.polygon([(x+size//2, y), (x, y+size), (x+size, y+size)], fill=color)
-
+            elif symbol == SYMBOLS["triangle_down"]:
+                draw.polygon([(x, y), (x+size, y), (x+size//2, y+size)], fill=color)
+            elif symbol == SYMBOLS["diamond"]:
+                draw.polygon([(x+size//2, y), (x+size, y+size//2),
+                              (x+size//2, y+size), (x, y+size//2)], fill=color)
+            elif symbol == SYMBOLS["gradient"]:
+                for i in range(size):
+                    c = tuple(int(c * (i/size)) for c in color)
+                    draw.line([x+i, y, x+i, y+size], fill=c)
         except Exception as e:
-            print("Decode error on line:", line, e)
+            print("Decode error:", line, e)
     return canvas
 
 # ---------------- Streamlit UI ----------------
-st.title("Smooth Symbolic Image Language (Squares + Circles + Triangles)")
+st.title("Advanced Symbolic Image Language")
 
 uploaded_file = st.file_uploader("Upload an Image", type=["png", "jpg", "jpeg"])
 if uploaded_file:
