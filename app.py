@@ -1,98 +1,111 @@
 import streamlit as st
 from PIL import Image, ImageDraw
 import numpy as np
+import io
 
-# --- Define a tiny color alphabet ---
-COLOR_ALPHABET = {
-    "A": (255, 0, 0),     # Red
-    "B": (0, 0, 255),     # Blue
-    "C": (0, 255, 0),     # Green
-    "D": (255, 255, 0),   # Yellow
-    "E": (0, 0, 0),       # Black
-    "F": (255, 255, 255)  # White
+# Symbolic alphabet
+SYMBOLS = {
+    "square": "⬛",
+    "circle": "⬤",
+    "triangle": "▲",
 }
 
-REVERSE_COLOR = {v: k for k, v in COLOR_ALPHABET.items()}
+def block_is_uniform(block, tolerance=15):
+    """Check if a block is mostly one color."""
+    pixels = np.array(block).reshape(-1, 3)
+    mean_color = pixels.mean(axis=0)
+    diffs = np.abs(pixels - mean_color).mean()
+    return diffs < tolerance, tuple(map(int, mean_color))
 
-
-def closest_color(rgb):
-    """Find the closest color in the alphabet to a given RGB pixel."""
-    diffs = []
-    for c in COLOR_ALPHABET.values():
-        diff = sum((p - q) ** 2 for p, q in zip(rgb, c))
-        diffs.append((diff, c))
-    return min(diffs, key=lambda x: x[0])[1]
-
-
-def encode_image(img, grid_size=8):
+def dominant_shape(block):
     """
-    Encode image into symbolic language by dividing into blocks.
+    Guess shape type: square, circle, triangle.
+    Currently random-ish based on brightness variance.
     """
-    img = img.convert("RGB")
-    w, h = img.size
-    lang = []
+    arr = np.array(block).astype(np.int32)
+    gray = arr.mean(axis=2)
+    var = gray.var()
+    if var < 100:  # flat = square
+        return "square"
+    elif var < 300:  # some gradient = circle
+        return "circle"
+    else:  # high detail = triangle
+        return "triangle"
 
-    for y in range(0, h, grid_size):
-        for x in range(0, w, grid_size):
-            block = img.crop((x, y, x + grid_size, y + grid_size))
-            arr = np.array(block)
-            avg_color = tuple(np.mean(arr.reshape(-1, 3), axis=0).astype(int))
-            nearest = closest_color(avg_color)
-            sym = REVERSE_COLOR[nearest]
-            size = grid_size
-            lang.append(f"⬛{sym}({x},{y})S{size}")
+def encode_block(x, y, size, img, min_size=2):
+    """Recursively encode a block of the image."""
+    block = img.crop((x, y, x + size, y + size))
+    uniform, color = block_is_uniform(block)
 
-    return " | ".join(lang)
+    if uniform or size <= min_size:
+        shape = dominant_shape(block)
+        symbol = f"{SYMBOLS[shape]}{color}@({x},{y})S{size}"
+        return [symbol]
+    else:
+        half = size // 2
+        symbols = []
+        for dx in [0, half]:
+            for dy in [0, half]:
+                symbols.extend(encode_block(x + dx, y + dy, half, img, min_size))
+        return symbols
 
+def encode_image_to_language(img, block_size=16):
+    """Encode an entire image to symbolic language."""
+    width, height = img.size
+    symbols = []
+    for y in range(0, height, block_size):
+        for x in range(0, width, block_size):
+            symbols.extend(encode_block(x, y, block_size, img))
+    return "\n".join(symbols)
 
-def decode_language(lang, img_size=(128, 128)):
-    """
-    Decode symbolic language back into an image.
-    """
-    canvas = Image.new("RGB", img_size, (255, 255, 255))
+def decode_language_to_image(symbols, width, height):
+    """Decode symbolic language back into an image."""
+    canvas = Image.new("RGB", (width, height), (255, 255, 255))
     draw = ImageDraw.Draw(canvas)
 
-    commands = lang.split("|")
-    for cmd in commands:
-        cmd = cmd.strip()
-        if not cmd:
-            continue
-
+    for line in symbols.splitlines():
         try:
-            shape = cmd[0]      # always ⬛ for now
-            color_key = cmd[1]  # e.g., "A"
-            inside = cmd[2:].split(")")[0]
-            coords = inside[1:].split(",")
-            x, y = int(coords[0]), int(coords[1])
-            size = int(cmd.split("S")[-1])
+            symbol, rest = line[0], line[1:]
+            color_str, pos_size = rest.split("@")
+            color = tuple(map(int, color_str.strip("()").split(",")))
+            pos, size_str = pos_size.split("S")
+            x, y = map(int, pos.strip("()").split(","))
+            size = int(size_str)
 
-            color = COLOR_ALPHABET[color_key]
-
-            if shape == "⬛":
-                draw.rectangle([x, y, x + size, y + size], fill=color)
+            if symbol == SYMBOLS["square"]:
+                draw.rectangle([x, y, x+size, y+size], fill=color)
+            elif symbol == SYMBOLS["circle"]:
+                draw.ellipse([x, y, x+size, y+size], fill=color)
+            elif symbol == SYMBOLS["triangle"]:
+                draw.polygon([(x+size//2, y), (x, y+size), (x+size, y+size)], fill=color)
 
         except Exception as e:
-            print("Error decoding command:", cmd, e)
-
+            print("Decode error on line:", line, e)
     return canvas
 
-
 # ---------------- Streamlit UI ----------------
-st.title("🖼️ Image Language Prototype")
-st.write("Upload an image → Encode to text → Decode back to image.")
+st.title("Smooth Symbolic Image Language (Squares + Circles + Triangles)")
 
-uploaded = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
-
-if uploaded:
-    img = Image.open(uploaded).resize((128, 128))  # small for demo
-    st.image(img, caption="Original Image", use_column_width=True)
+uploaded_file = st.file_uploader("Upload an Image", type=["png", "jpg", "jpeg"])
+if uploaded_file:
+    img = Image.open(uploaded_file).convert("RGB")
+    st.image(img, caption="Original", use_column_width=True)
 
     # Encode
-    lang = encode_image(img, grid_size=16)
-    st.subheader("📝 Encoded Language")
-    st.text_area("Symbolic text", value=lang, height=200)
+    lang = encode_image_to_language(img, block_size=16)
+    st.subheader("Encoded Language")
+    st.text_area("Symbols", lang[:2000] + ("..." if len(lang) > 2000 else ""), height=300)
 
     # Decode
-    decoded = decode_language(lang, img_size=(128, 128))
-    st.subheader("🔄 Decoded Image")
-    st.image(decoded, caption="Reconstructed from Language", use_column_width=True)
+    decoded_img = decode_language_to_image(lang, *img.size)
+    st.subheader("Decoded Image")
+    st.image(decoded_img, caption="Reconstructed", use_column_width=True)
+
+    # Download language
+    lang_bytes = io.BytesIO(lang.encode())
+    st.download_button("Download Symbolic Language", lang_bytes, "symbols.txt", "text/plain")
+
+    # Download decoded image
+    img_bytes = io.BytesIO()
+    decoded_img.save(img_bytes, format="PNG")
+    st.download_button("Download Decoded Image", img_bytes.getvalue(), "decoded.png", "image/png")
